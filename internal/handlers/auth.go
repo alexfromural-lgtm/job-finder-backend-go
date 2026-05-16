@@ -195,3 +195,8 @@ func (h *AuthHandler) UpgradeToRecruiter(w http.ResponseWriter, r *http.Request)
 }
 
 
+// errUnauth returns a standard 401 AppError for missing context identity.
+// Used by handlers that call middleware.GetUserID and need a consistent error.
+func errUnauth() error {
+	return apperrors.New("Not authenticated", 401)
+}
