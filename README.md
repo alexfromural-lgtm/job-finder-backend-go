@@ -31,7 +31,7 @@ cp .env.sample .env
 docker compose up --build
 
 # 3. (Optional) Seed the database with demo data
-docker compose run --rm api go run ./cmd/seed
+docker compose run --rm job-finder-backend-go go run ./cmd/seed
 ```
 
 The API is now available at **http://localhost:5002**.

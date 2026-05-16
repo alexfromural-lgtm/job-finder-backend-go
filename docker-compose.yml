@@ -1,74 +1,89 @@
-version: "3.9"
 
 services:
-  # ── Go API server ─────────────────────────────────────────────────────────
-  job-finder-backend-go:
+  backend:
     build: .
     container_name: job-finder-backend-go
     restart: unless-stopped
     ports:
       - "5002:5002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql://job_finder_user:secure_password_123@db:5432/job_finder
+      DATABASE_URL: ${DATABASE_URL}
+      GO_ENV: ${GO_ENV}
+      PORT: ${PORT}
       ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET}
       REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
       ACCESS_TOKEN_EXPIRES_IN: 15m
       REFRESH_TOKEN_EXPIRES_IN: 7d
-      PORT: 5002
-      GO_ENV: development
-      REDIS_URL: redis://redis:6379
-      QUEUE_CONCURRENCY: 5
+      REDIS_URL: ${REDIS_URL}
+      QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    networks:
+      - job-network
 
-  # ── PostgreSQL ────────────────────────────────────────────────────────────
-  db:
+    volumes:
+      - .:/app
+  postgres:
     image: postgres:16-alpine
-    container_name: job-finder-db
+    container_name: job-finder-db-go
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: job_finder_user
-      POSTGRES_PASSWORD: secure_password_123
-      POSTGRES_DB: job_finder
     ports:
       - "5432:5432"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - job-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U job_finder_user -d job_finder"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: job-finder-pgadmin-go
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    env_file:
+      - .env
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    depends_on:
+      - postgres
+    networks:
+      - job-network
 
-  # ── Redis 7 ───────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: job-finder-redis
+    container_name: job-finder-redis-go
     restart: unless-stopped
     ports:
       - "6379:6379"
+    networks:
+      - job-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # ── pgAdmin4 ──────────────────────────────────────────────────────────────
-  pgadmin:
-    image: dpage/pgadmin4
-    container_name: job-finder-pgadmin
-    restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5050:80"
-    depends_on:
-      - db
+networks:
+  job-network:
+    driver: bridge
 
 volumes:
   pgdata:
