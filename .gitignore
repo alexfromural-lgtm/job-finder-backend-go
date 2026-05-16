@@ -1,0 +1,27 @@
+# Binaries
+server
+seed
+
+# Environment files
+.env
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Module download cache (not committed)
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp

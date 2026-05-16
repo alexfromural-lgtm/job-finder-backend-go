@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  # ── Go API server ─────────────────────────────────────────────────────────
+  job-finder-backend-go:
+    build: .
+    container_name: job-finder-backend-go
+    restart: unless-stopped
+    ports:
+      - "5002:5002"
+    environment:
+      DATABASE_URL: postgresql://job_finder_user:secure_password_123@db:5432/job_finder
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET}
+      REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
+      ACCESS_TOKEN_EXPIRES_IN: 15m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+      PORT: 5002
+      GO_ENV: development
+      REDIS_URL: redis://redis:6379
+      QUEUE_CONCURRENCY: 5
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: job-finder-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: job_finder_user
+      POSTGRES_PASSWORD: secure_password_123
+      POSTGRES_DB: job_finder
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U job_finder_user -d job_finder"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis 7 ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: job-finder-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── pgAdmin4 ──────────────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: job-finder-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
