@@ -8,6 +8,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/hibiken/asynq v0.24.1
 	github.com/jackc/pgx/v5 v5.7.2
+	github.com/klauspost/compress v1.17.11
 	github.com/rs/cors v1.11.1
 	golang.org/x/crypto v0.31.0
 )
