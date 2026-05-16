@@ -1,7 +1,9 @@
 
 services:
   backend:
-    build: .
+    build:
+      context: .
+      target: builder
     container_name: job-finder-backend-go
     restart: unless-stopped
     ports:
@@ -19,16 +21,13 @@ services:
       PORT: ${PORT}
       ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET}
       REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
-      ACCESS_TOKEN_EXPIRES_IN: 15m
-      REFRESH_TOKEN_EXPIRES_IN: 7d
+      ACCESS_TOKEN_EXPIRES_IN: ${ACCESS_TOKEN_EXPIRES_IN}
+      REFRESH_TOKEN_EXPIRES_IN: ${REFRESH_TOKEN_EXPIRES_IN}
       REDIS_URL: ${REDIS_URL}
       QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
     networks:
       - job-network
-
-    volumes:
-      - .:/app
   postgres:
     image: postgres:16-alpine
     container_name: job-finder-db-go
