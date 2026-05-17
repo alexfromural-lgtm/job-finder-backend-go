@@ -56,8 +56,8 @@ func (s *JobSeekerService) GetJobSeekerProfile(ctx context.Context, userID strin
 	row := s.pool.QueryRow(ctx,
 		`SELECT p.id, p.user_id, COALESCE(p.bio,''), COALESCE(p.location,''), COALESCE(p.skills,'{}'),
 		        COALESCE(p.education,''), COALESCE(p.experience,''), COALESCE(p.resume_url,''),
-		        p.created_at, p.updated_at,
-		        u.name, u.email, u.roles
+		        u.created_at, u.updated_at,
+		        u.name, u.email, u.roles::text[]
 		 FROM job_seeker_profiles p
 		 JOIN users u ON u.id = p.user_id
 		 WHERE p.user_id = $1 LIMIT 1`, userID)

@@ -5,9 +5,14 @@ package queue
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/hibiken/asynq"
 )
+
+// completedTaskRetention is how long asynq keeps a completed task in Redis.
+// This must be long enough for the frontend poller to observe "completed" status.
+const completedTaskRetention = 30 * time.Second
 
 // Client wraps asynq.Client and exposes typed enqueue helpers.
 type Client struct {
@@ -37,7 +42,7 @@ func (c *Client) EnqueueApplyToJob(payload ApplyToJobPayload) (string, error) {
 		return "", err
 	}
 	task := asynq.NewTask(TaskApplyToJob, b)
-	info, err := c.inner.Enqueue(task)
+	info, err := c.inner.Enqueue(task, asynq.Retention(completedTaskRetention))
 	if err != nil {
 		return "", fmt.Errorf("queue: enqueue apply-to-job: %w", err)
 	}
@@ -52,7 +57,7 @@ func (c *Client) EnqueueSaveJob(payload SaveJobPayload) (string, error) {
 		return "", err
 	}
 	task := asynq.NewTask(TaskSaveJob, b)
-	info, err := c.inner.Enqueue(task)
+	info, err := c.inner.Enqueue(task, asynq.Retention(completedTaskRetention))
 	if err != nil {
 		return "", fmt.Errorf("queue: enqueue save-job: %w", err)
 	}

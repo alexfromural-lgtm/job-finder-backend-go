@@ -55,8 +55,8 @@ func (s *RecruiterService) GetRecruiterProfile(ctx context.Context, userID strin
 		`SELECT r.id, r.user_id,
 		        COALESCE(r.company_name,''), COALESCE(r.company_website,''),
 		        COALESCE(r.description,''), COALESCE(r.industry,''),
-		        r.created_at, r.updated_at,
-		        u.name, u.email, u.roles
+		        u.created_at, u.updated_at,
+		        u.name, u.email, u.roles::text[]
 		 FROM recruiter_profiles r
 		 JOIN users u ON u.id = r.user_id
 		 WHERE r.user_id = $1 LIMIT 1`, userID)
@@ -96,7 +96,7 @@ func (s *RecruiterService) UpdateRecruiterProfile(ctx context.Context, userID st
 	}
 
 	// Fetch user info to attach
-	_ = s.pool.QueryRow(ctx, `SELECT name, email, roles FROM users WHERE id = $1`, userID).
+	_ = s.pool.QueryRow(ctx, `SELECT name, email, roles::text[] FROM users WHERE id = $1`, userID).
 		Scan(&p.User.Name, &p.User.Email, &p.User.Roles)
 
 	return p, nil
