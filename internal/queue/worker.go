@@ -66,8 +66,13 @@ func makeApplyHandler(svc *services.JobSeekerService) asynq.HandlerFunc {
 
 		fmt.Printf("[Worker] Processing apply-to-job | user=%s job=%s\n", p.UserID, p.JobID)
 
-		if err := svc.ApplyToJob(ctx, p.UserID, p.JobID, p.CoverLetter); err != nil {
+		app, err := svc.ApplyToJob(ctx, p.UserID, p.JobID, p.CoverLetter)
+		if err != nil {
 			return fmt.Errorf("apply-to-job: %w", err)
+		}
+
+		if b, err := json.Marshal(app); err == nil {
+			t.ResultWriter().Write(b)
 		}
 
 		fmt.Printf("[Worker] ✓ apply-to-job completed | user=%s job=%s\n", p.UserID, p.JobID)
@@ -86,8 +91,13 @@ func makeSaveHandler(svc *services.JobSeekerService) asynq.HandlerFunc {
 
 		fmt.Printf("[Worker] Processing save-job | user=%s job=%s\n", p.UserID, p.JobID)
 
-		if err := svc.SaveJob(ctx, p.UserID, p.JobID); err != nil {
+		savedJob, err := svc.SaveJob(ctx, p.UserID, p.JobID)
+		if err != nil {
 			return fmt.Errorf("save-job: %w", err)
+		}
+
+		if b, err := json.Marshal(savedJob); err == nil {
+			t.ResultWriter().Write(b)
 		}
 
 		fmt.Printf("[Worker] ✓ save-job completed | user=%s job=%s\n", p.UserID, p.JobID)

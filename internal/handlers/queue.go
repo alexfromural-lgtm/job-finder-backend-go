@@ -2,6 +2,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -61,6 +62,13 @@ func (h *QueueHandler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	// Mirrors Node.js: if (state === "failed") { response.failedReason = job.failedReason }
 	if resp.Status == "failed" && info.LastErr != "" {
 		resp.FailedReason = info.LastErr
+	}
+
+	if len(info.Result) > 0 {
+		var res any
+		if err := json.Unmarshal(info.Result, &res); err == nil {
+			resp.Result = res
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

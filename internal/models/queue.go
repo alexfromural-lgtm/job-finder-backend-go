@@ -10,4 +10,5 @@ type QueueJobStatusResponse struct {
 	AttemptsMade int    `json:"attemptsMade"`
 	// FailedReason is populated when Status == "failed"
 	FailedReason string `json:"failedReason,omitempty"`
+	Result       any    `json:"result,omitempty"`
 }

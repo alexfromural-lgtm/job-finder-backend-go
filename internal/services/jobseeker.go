@@ -109,20 +109,21 @@ func (s *JobSeekerService) UpdateJobSeekerProfile(ctx context.Context, userID st
 
 // ApplyToJob executes the apply-to-job work synchronously (called by the queue worker).
 // Mirrors jobseeker.service.ts → applyToJob().
-func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverLetter string) error {
+func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverLetter string) (models.ApplicationRow, error) {
+	var app models.ApplicationRow
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
-		return err
+		return app, err
 	}
 
 	// Check job exists and is active
 	var isActive bool
 	err = s.pool.QueryRow(ctx, `SELECT is_active FROM jobs WHERE id = $1 LIMIT 1`, jobID).Scan(&isActive)
 	if err != nil {
-		return apperrors.New("Job not found", 404)
+		return app, apperrors.New("Job not found", 404)
 	}
 	if !isActive {
-		return apperrors.New("This job is no longer active", 410)
+		return app, apperrors.New("This job is no longer active", 410)
 	}
 
 	// Check for duplicate application
@@ -131,13 +132,16 @@ func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverL
 		`SELECT EXISTS(SELECT 1 FROM applications WHERE job_id=$1 AND job_seeker_id=$2)`,
 		jobID, jobSeekerID).Scan(&exists)
 	if exists {
-		return apperrors.New("You have already applied to this job", 409)
+		return app, apperrors.New("You have already applied to this job", 409)
 	}
 
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO applications (job_id, job_seeker_id, cover_letter) VALUES ($1, $2, $3)`,
-		jobID, jobSeekerID, coverLetter)
-	return err
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO applications (job_id, job_seeker_id, cover_letter) VALUES ($1, $2, $3)
+		 RETURNING id, job_id, job_seeker_id, COALESCE(cover_letter, ''), status, created_at, updated_at`,
+		jobID, jobSeekerID, coverLetter).Scan(
+		&app.ID, &app.JobID, &app.JobSeekerID, &app.CoverLetter, &app.Status, &app.CreatedAt, &app.UpdatedAt,
+	)
+	return app, err
 }
 
 // GetApplications returns all applications for the job seeker with job summary.
@@ -205,24 +209,28 @@ func (s *JobSeekerService) WithdrawApplication(ctx context.Context, userID, appl
 
 // SaveJob executes the save-job work synchronously (called by the queue worker).
 // Mirrors jobseeker.service.ts → saveJob().
-func (s *JobSeekerService) SaveJob(ctx context.Context, userID, jobID string) error {
+func (s *JobSeekerService) SaveJob(ctx context.Context, userID, jobID string) (models.SavedJobRow, error) {
+	var saved models.SavedJobRow
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
-		return err
+		return saved, err
 	}
 
 	// Check job exists
 	var exists bool
 	_ = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE id=$1)`, jobID).Scan(&exists)
 	if !exists {
-		return apperrors.New("Job not found", 404)
+		return saved, apperrors.New("Job not found", 404)
 	}
 
-	_, err = s.pool.Exec(ctx,
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO saved_jobs (job_id, job_seeker_id) VALUES ($1, $2)
-		 ON CONFLICT (job_id, job_seeker_id) DO NOTHING`,
-		jobID, jobSeekerID)
-	return err
+		 ON CONFLICT (job_id, job_seeker_id) DO UPDATE SET job_id = EXCLUDED.job_id
+		 RETURNING id, job_id, job_seeker_id, saved_at`,
+		jobID, jobSeekerID).Scan(
+		&saved.ID, &saved.JobID, &saved.JobSeekerID, &saved.SavedAt,
+	)
+	return saved, err
 }
 
 // GetSavedJobs returns all saved jobs for the seeker with job summary.
