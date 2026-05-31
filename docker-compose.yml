@@ -82,7 +82,8 @@ services:
 
 networks:
   job-network:
-    driver: bridge
+    external: true
+    name: job-finder-network
 
 volumes:
   pgdata:
