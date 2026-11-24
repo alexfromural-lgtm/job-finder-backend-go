@@ -1,4 +1,27 @@
-// Package services contains business logic, mirroring src/services/ in the Node.js backend.
+// ============================================================
+// FILE: internal/services/recruiter.go
+// ROLE: Recruiter profile and application management business logic.
+//
+// 📚 KEY CONCEPTS IN THIS FILE:
+//
+//   RECRUITER PROFILE vs USER:
+//     The users table stores credentials (email, password, roles).
+//     The recruiter_profiles table stores company info (company_name, etc.).
+//     They are linked by user_id. This separation allows one user to have
+//     both a job_seeker_profiles AND a recruiter_profiles row (upgrade flow).
+//
+//   OWNERSHIP CHAIN:
+//     To view applications for a job:
+//       User → recruiter_profiles.id → jobs.recruiter_id → applications.job_id
+//     The service walks this chain to verify the recruiter owns the job.
+//
+//   APPLICATION STATUS:
+//     Status is an enum: submitted | shortlisted | rejected | under_review
+//     The request model uses `validate:"oneof=..."` to enforce the allowed values.
+//
+// 📝 COMPARISON with Node.js:
+//   recruiter.service.ts → RecruiterService struct methods
+// ============================================================
 package services
 
 import (
@@ -11,7 +34,6 @@ import (
 )
 
 // RecruiterService handles all recruiter business logic.
-// Mirrors src/services/recruiter.service.ts.
 type RecruiterService struct {
 	pool *pgxpool.Pool
 }
@@ -21,9 +43,10 @@ func NewRecruiterService(pool *pgxpool.Pool) *RecruiterService {
 	return &RecruiterService{pool: pool}
 }
 
-// ── internal helpers ──────────────────────────────────────────────────────────
+// ── private helpers ───────────────────────────────────────────────────────────
 
 // getRecruiterID resolves userID → recruiter_profiles.id.
+// All recruiter operations start here to get the profile ID.
 func (s *RecruiterService) getRecruiterID(ctx context.Context, userID string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx,
@@ -34,7 +57,13 @@ func (s *RecruiterService) getRecruiterID(ctx context.Context, userID string) (s
 	return id, nil
 }
 
-// scanRecruiterProfile scans a recruiter profile row (with user join).
+// scanRecruiterProfile scans a profile row with user JOIN.
+// Uses the same interface trick as scanProfile in jobseeker.go.
+//
+// 📝 WHY SCAN INTO NESTED STRUCT?
+//   models.RecruiterProfileResponse has a User field (UserSummary struct).
+//   We scan user fields (name, email, roles) directly into p.User.Name, etc.
+//   This gives us the full response in one SQL query instead of two.
 func scanRecruiterProfile(row interface{ Scan(...any) error }) (models.RecruiterProfileResponse, error) {
 	var p models.RecruiterProfileResponse
 	err := row.Scan(
@@ -49,7 +78,10 @@ func scanRecruiterProfile(row interface{ Scan(...any) error }) (models.Recruiter
 // ── public service methods ────────────────────────────────────────────────────
 
 // GetRecruiterProfile returns the full recruiter profile with user info joined.
-// Mirrors recruiter.service.ts → getRecruiterProfile().
+//
+// 📝 roles::text[]:
+//   The users.roles column is a PostgreSQL array of a custom enum type.
+//   ::text[] casts it to a text array so pgx can scan it into []string.
 func (s *RecruiterService) GetRecruiterProfile(ctx context.Context, userID string) (models.RecruiterProfileResponse, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT r.id, r.user_id,
@@ -69,7 +101,12 @@ func (s *RecruiterService) GetRecruiterProfile(ctx context.Context, userID strin
 }
 
 // UpdateRecruiterProfile applies partial updates using COALESCE.
-// Mirrors recruiter.service.ts → updateRecruiterProfile().
+// Same PATCH pattern as UpdateJobSeekerProfile: nil pointer = keep existing.
+//
+// 📝 RETURNING without user JOIN:
+//   The UPDATE RETURNING clause only returns columns from recruiter_profiles.
+//   We do a separate SELECT to fetch user info (name, email, roles).
+//   This keeps the UPDATE simple; the extra SELECT is a small price for clarity.
 func (s *RecruiterService) UpdateRecruiterProfile(ctx context.Context, userID string, req models.UpdateRecruiterProfileRequest) (models.RecruiterProfileResponse, error) {
 	row := s.pool.QueryRow(ctx,
 		`UPDATE recruiter_profiles
@@ -95,7 +132,7 @@ func (s *RecruiterService) UpdateRecruiterProfile(ctx context.Context, userID st
 		return models.RecruiterProfileResponse{}, apperrors.New("Profile not found", 404)
 	}
 
-	// Fetch user info to attach
+	// Fetch user info separately (UPDATE RETURNING doesn't include the JOIN)
 	_ = s.pool.QueryRow(ctx, `SELECT name, email, roles::text[] FROM users WHERE id = $1`, userID).
 		Scan(&p.User.Name, &p.User.Email, &p.User.Roles)
 
@@ -103,14 +140,21 @@ func (s *RecruiterService) UpdateRecruiterProfile(ctx context.Context, userID st
 }
 
 // GetApplicationsForJob returns all applications for a job, verifying recruiter ownership.
-// Mirrors recruiter.service.ts → getApplicationsForJob().
+//
+// 📝 OWNERSHIP VERIFICATION STEPS:
+//   1. getRecruiterID(userID) → recruiter_profiles.id
+//   2. SELECT recruiter_id FROM jobs WHERE id = jobID
+//   3. If ownerID != recruiterID → 403 Forbidden
+//
+// 📝 WHY THIS MATTERS:
+//   Without the ownership check, any authenticated recruiter could view
+//   applications for jobs posted by other recruiters — a data leak.
 func (s *RecruiterService) GetApplicationsForJob(ctx context.Context, userID, jobID string) ([]models.ApplicationForRecruiter, error) {
 	recruiterID, err := s.getRecruiterID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Verify the recruiter owns this job
 	var ownerID string
 	err = s.pool.QueryRow(ctx, `SELECT recruiter_id FROM jobs WHERE id = $1 LIMIT 1`, jobID).Scan(&ownerID)
 	if err != nil {
@@ -138,6 +182,7 @@ func (s *RecruiterService) GetApplicationsForJob(ctx context.Context, userID, jo
 	apps := make([]models.ApplicationForRecruiter, 0)
 	for rows.Next() {
 		var a models.ApplicationForRecruiter
+		// Scan into nested struct: &a.JobSeeker.Name, &a.JobSeeker.Email, etc.
 		err := rows.Scan(
 			&a.ID, &a.JobID, &a.JobSeekerID,
 			&a.CoverLetter, &a.Status, &a.CreatedAt, &a.UpdatedAt,
@@ -152,8 +197,18 @@ func (s *RecruiterService) GetApplicationsForJob(ctx context.Context, userID, jo
 	return apps, nil
 }
 
-// UpdateApplicationStatus changes the status of an application, verifying recruiter ownership.
-// Mirrors recruiter.service.ts → updateApplicationStatus().
+// UpdateApplicationStatus changes the status of an application, verifying ownership.
+//
+// 📝 STATUS VALUES (from models.UpdateApplicationStatusRequest validate tag):
+//   "submitted"   → initial state when seeker applies
+//   "under_review" → recruiter has started reviewing
+//   "shortlisted" → recruiter likes the candidate
+//   "rejected"    → recruiter decided not to proceed
+//
+// 📝 TWO-STEP PATTERN:
+//   1. UPDATE applications SET status = $2 WHERE id = $1
+//   2. SELECT the full row (with applicant info JOIN) to return
+//   We do this because UPDATE RETURNING doesn't support JOINs in PostgreSQL.
 func (s *RecruiterService) UpdateApplicationStatus(ctx context.Context, userID, applicationID, status string) (models.ApplicationForRecruiter, error) {
 	recruiterID, err := s.getRecruiterID(ctx, userID)
 	if err != nil {
@@ -174,7 +229,7 @@ func (s *RecruiterService) UpdateApplicationStatus(ctx context.Context, userID, 
 		return models.ApplicationForRecruiter{}, apperrors.New("You are not authorized to update this application", 403)
 	}
 
-	// Perform the update
+	// Step 1: Update the status
 	_, err = s.pool.Exec(ctx,
 		`UPDATE applications SET status = $2, updated_at = NOW() WHERE id = $1`,
 		applicationID, status)
@@ -182,7 +237,7 @@ func (s *RecruiterService) UpdateApplicationStatus(ctx context.Context, userID, 
 		return models.ApplicationForRecruiter{}, err
 	}
 
-	// Fetch the full updated row with applicant info
+	// Step 2: Fetch the full updated application with applicant info
 	row := s.pool.QueryRow(ctx,
 		`SELECT a.id, a.job_id, a.job_seeker_id,
 		        COALESCE(a.cover_letter,''), a.status, a.created_at, a.updated_at,

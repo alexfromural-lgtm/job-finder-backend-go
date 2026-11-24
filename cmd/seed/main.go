@@ -1,57 +1,97 @@
-// cmd/seed/main.go — Standalone database seeder.
-// Mirrors prisma/seed.ts: same demo users, recruiter, job, application, and saved job.
-// Automatically runs migrations before seeding so it works on a fresh database.
+// ============================================================
+// FILE: cmd/seed/main.go
+// ROLE: Standalone database seeding script.
 //
-// Usage:
+// 📚 WHAT IS DATABASE SEEDING?
+//   Seeding is the process of populating a database with initial,
+//   predictable mock data (demo accounts, sample job posts, etc.)
+//   so that developers can test features immediately without
+//   manually registering accounts and entering sample data through forms.
 //
-//	DATABASE_URL=postgresql://... go run ./cmd/seed
-//	# or inside Docker:
-//	docker compose run --rm backend go run ./cmd/seed
+// 💡 WHEN IS THIS RUN?
+//   - On first setup: `go run ./cmd/seed`
+//   - Inside docker: `docker compose run --rm backend go run ./cmd/seed`
+//   - In CI/CD pipelines before integration tests.
+//
+// 📐 STEP-BY-STEP EXECUTION FLOW:
+//   1. Read DATABASE_URL from environment variables.
+//   2. Connect to PostgreSQL using pgxpool.
+//   3. Read and execute `001_initial.sql` migration to create tables if needed.
+//   4. Clean/truncate existing data in foreign-key safe order.
+//   5. Insert Admin user.
+//   6. Insert Recruiter user + profile + sample job.
+//   7. Insert Job Seeker user + profile + application + saved job.
+// ============================================================
 package main
 
 import (
-	"context"
-	"fmt"
-	"os"
+	"context" // Standard context package for managing cancellation and timeouts
+	"fmt"     // Formatted I/O (Println, Fprintf, Sprintf)
+	"os"      // Operating system functions (reading env vars, files, exiting)
 
+	// pgx/v5 connection pool package:
 	"github.com/jackc/pgx/v5/pgxpool"
+	// bcrypt password hashing algorithm for storing secure mock credentials:
 	"golang.org/x/crypto/bcrypt"
 )
 
+// migrationFile defines the relative path to our database migration schema.
+//
+// 📝 EXAMPLE:
+//   "internal/db/migrations/001_initial.sql" contains CREATE TABLE IF NOT EXISTS statements.
 const migrationFile = "internal/db/migrations/001_initial.sql"
 
 func main() {
+	// context.Background() creates a root context that is never cancelled.
+	// Used here because this is a CLI script, not a web request with a 30s timeout.
 	ctx := context.Background()
 
+	// ── 1. Read Database Connection String ────────────────────────────────────
+	// os.Getenv returns empty string "" if the variable is not defined.
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		fmt.Fprintln(os.Stderr, "[seed] ERROR: DATABASE_URL env var is required")
-		os.Exit(1)
+		os.Exit(1) // Exit code 1 indicates an error to the calling terminal or Docker
 	}
 
+	// ── 2. Establish PostgreSQL Pool Connection ───────────────────────────────
+	// pgxpool.New parses the connection string and initializes the pool.
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[seed] ERROR: failed to connect to database: %v\n", err)
 		os.Exit(1)
 	}
+	// defer guarantees pool.Close() runs when main exits, releasing database sockets.
 	defer pool.Close()
 
 	fmt.Println("🌱 Starting seed...")
 
-	// ── Run migrations (idempotent — reads 001_initial.sql from disk) ─────────
+	// ── 3. Run Migrations ─────────────────────────────────────────────────────
+	// Reading the SQL schema from disk and executing it ensures that tables
+	// exist even if migrations weren't run separately beforehand.
 	fmt.Printf("⚙️  Applying migrations from %s...\n", migrationFile)
 	sqlBytes, err := os.ReadFile(migrationFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[seed] ERROR: could not read migration file: %v\n", err)
 		os.Exit(1)
 	}
+	// pool.Exec executes one or more raw SQL queries without returning rows.
 	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
 		fmt.Fprintf(os.Stderr, "[seed] ERROR: migration failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("✅ Migrations applied")
 
-	// ── Clean existing data in FK-safe order ──────────────────────────────────
+	// ── 4. Clean Existing Data in Foreign-Key Safe Order ──────────────────────
+	// In relational databases, you cannot delete a row from a parent table (e.g. `users`)
+	// while child tables (e.g. `applications` or `jobs`) have Foreign Keys pointing to it.
+	// Therefore, we delete child rows FIRST, then parent rows.
+	//
+	// Order:
+	//   1. saved_jobs & applications (depend on jobs & seekers)
+	//   2. jobs (depends on recruiter_profiles)
+	//   3. job_seeker_profiles & recruiter_profiles (depend on users)
+	//   4. users (root table)
 	tables := []string{
 		"saved_jobs", "applications", "jobs",
 		"job_seeker_profiles", "recruiter_profiles", "users",
@@ -62,9 +102,12 @@ func main() {
 		}
 	}
 
-	// ── Admin user ────────────────────────────────────────────────────────────
+	// ── 5. Insert Admin User ──────────────────────────────────────────────────
+	// bcrypt.GenerateFromPassword hashes "admin" into a 60-character bcrypt hash string.
+	// Cost = bcrypt.DefaultCost (10).
 	adminHash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 	var adminID string
+	// RETURNING id captures the UUID generated by PostgreSQL gen_random_uuid().
 	err = pool.QueryRow(ctx,
 		`INSERT INTO users (name, email, password, roles)
 		 VALUES ($1, $2, $3, $4) RETURNING id`,
@@ -73,7 +116,7 @@ func main() {
 	must(err, "create admin user")
 	fmt.Println("✅ Created admin user: admin@example1.com")
 
-	// ── Recruiter user + profile + job ────────────────────────────────────────
+	// ── 6. Insert Recruiter User + Recruiter Profile + Job ─────────────────────
 	recruiterHash, _ := bcrypt.GenerateFromPassword([]byte("recruiter123"), bcrypt.DefaultCost)
 	var recruiterUserID string
 	err = pool.QueryRow(ctx,
@@ -108,7 +151,7 @@ func main() {
 	must(err, "create job")
 	fmt.Println("✅ Created job: Senior FullStack Developer")
 
-	// ── Job seeker user + profile + application + saved job ───────────────────
+	// ── 7. Insert Job Seeker User + Profile + Application + Saved Job ─────────
 	seekerHash, _ := bcrypt.GenerateFromPassword([]byte("seeker123"), bcrypt.DefaultCost)
 	var seekerUserID string
 	err = pool.QueryRow(ctx,
@@ -133,6 +176,7 @@ func main() {
 	must(err, "create seeker profile")
 	fmt.Println("✅ Created job seeker: seeker@example.com")
 
+	// Create an initial application by John for Jane's job
 	_, err = pool.Exec(ctx,
 		`INSERT INTO applications (job_id, job_seeker_id, cover_letter)
 		 VALUES ($1, $2, $3)`,
@@ -141,6 +185,7 @@ func main() {
 	must(err, "create application")
 	fmt.Println("✅ Created application")
 
+	// Save the job to John's saved jobs list
 	_, err = pool.Exec(ctx,
 		`INSERT INTO saved_jobs (job_id, job_seeker_id) VALUES ($1, $2)`,
 		jobID, seekerProfileID,
@@ -151,6 +196,14 @@ func main() {
 	fmt.Println("✅ Seeding complete!")
 }
 
+// must is a helper function that crashes the script if err is not nil.
+//
+// 💡 LEARNING TIP:
+//   In web request handlers, you never want to panic or os.Exit.
+//   Instead, you return errors or HTTP 500.
+//   However, in standalone CLI setup scripts like database seeders,
+//   failing fast with os.Exit(1) is the standard idiomatic practice
+//   because continuing with half-seeded data would leave the database broken.
 func must(err error, op string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[seed] ERROR during %s: %v\n", op, err)

@@ -1,12 +1,33 @@
-// Package models contains request/response DTO structs used by handlers and services.
+// ============================================================
+// FILE: internal/models/jobseeker.go
+// ROLE: Request & Response Data Transfer Objects (DTOs) for Job Seekers.
+//
+// 📚 WHAT THIS FILE COVERS:
+//   - Job seeker profile updates (bio, location, skills, resume).
+//   - Job application submissions and withdrawal.
+//   - Saved jobs (bookmarks).
+//   - Nested relationships (e.g. including Job details inside an Application).
+// ============================================================
 package models
 
 import "time"
 
-// ── Job Seeker request bodies ──────────────────────────────────────────────────
+// ── Job Seeker Request Bodies ──────────────────────────────────────────────────
 
-// UpdateJobSeekerProfileRequest mirrors updateJobSeekerProfileSchema (jobseeker.schema.ts).
-// All fields are optional — nil means "keep existing value" (COALESCE in SQL).
+// UpdateJobSeekerProfileRequest defines the partial update payload for a job seeker.
+//
+// 💡 POINTER FIELDS (*string):
+//   Using pointers allows distinguishing between:
+//   - Field omitted in JSON (value is nil -> keep existing database value via COALESCE)
+//   - Field provided as "" (empty string -> clear database field)
+//
+// 📝 EXAMPLE INCOMING JSON:
+//   {
+//     "bio": "Full-stack engineer specializing in Go and React",
+//     "location": "London, UK",
+//     "skills": ["Go", "Docker", "PostgreSQL", "React"],
+//     "resumeUrl": "https://storage.example.com/resumes/my-resume.pdf"
+//   }
 type UpdateJobSeekerProfileRequest struct {
 	Bio        *string  `json:"bio"        validate:"omitempty,max=500"`
 	Location   *string  `json:"location"   validate:"omitempty,max=100"`
@@ -16,23 +37,46 @@ type UpdateJobSeekerProfileRequest struct {
 	ResumeURL  *string  `json:"resumeUrl"  validate:"omitempty,url"`
 }
 
-// ApplyToJobRequest carries the optional cover letter for a job application.
-// Mirrors applicationSchema from application.schema.ts.
+// ApplyToJobRequest contains the cover letter when submitting a job application.
+//
+// 📝 EXAMPLE INCOMING JSON:
+//   {
+//     "coverLetter": "Hello, I am enthusiastic about applying for this role because..."
+//   }
 type ApplyToJobRequest struct {
 	CoverLetter string `json:"coverLetter" validate:"omitempty,max=2000"`
 }
 
-// ── Job Seeker response bodies ─────────────────────────────────────────────────
+// ── Job Seeker Response Bodies ─────────────────────────────────────────────────
 
-// UserSummary is the safe subset of user fields included inside profile responses.
+// UserSummary embeds safe user account fields inside profile/application DTOs.
 type UserSummary struct {
 	Name  string   `json:"name"`
 	Email string   `json:"email"`
 	Roles []string `json:"roles"`
 }
 
-// JobSeekerProfileResponse is the full profile row with user info joined.
-// Mirrors the Prisma include: { user: { select: { name, email, roles } } }
+// JobSeekerProfileResponse represents the full job seeker profile
+// combined with the underlying user account details.
+//
+// 📝 EXAMPLE OUTGOING JSON:
+//   {
+//     "id": "b3e2a1...",
+//     "userId": "c5d4...",
+//     "bio": "Software developer",
+//     "location": "San Francisco",
+//     "skills": ["Go", "AWS"],
+//     "education": "BS Computer Science",
+//     "experience": "3 years",
+//     "resumeUrl": "https://example.com/resume.pdf",
+//     "createdAt": "2026-11-23T19:00:00Z",
+//     "updatedAt": "2026-11-23T19:00:00Z",
+//     "user": {
+//       "name": "Alex",
+//       "email": "alex@example.com",
+//       "roles": ["JOB_SEEKER"]
+//     }
+//   }
 type JobSeekerProfileResponse struct {
 	ID         string      `json:"id"`
 	UserID     string      `json:"userId"`
@@ -47,12 +91,13 @@ type JobSeekerProfileResponse struct {
 	User       UserSummary `json:"user"`
 }
 
-// ProfileResponse wraps the profile — matches Node.js: res.json({ profile })
+// ProfileResponse wraps the single job seeker profile response.
 type ProfileResponse struct {
 	Profile JobSeekerProfileResponse `json:"profile"`
 }
 
-// JobSummaryInApplication is the minimal job info inside an application row.
+// JobSummaryInApplication represents the embedded job details returned
+// when a job seeker views their list of job applications.
 type JobSummaryInApplication struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
@@ -62,8 +107,10 @@ type JobSummaryInApplication struct {
 	CompanyName string `json:"companyName"`
 }
 
-// ApplicationRow represents a job application with embedded job summary.
-// Mirrors the Prisma include shape in getApplications().
+// ApplicationRow represents an application record including embedded job info.
+//
+// 📝 STATUS VALUES:
+//   "submitted" | "under_review" | "shortlisted" | "rejected"
 type ApplicationRow struct {
 	ID          string                  `json:"id"`
 	JobID       string                  `json:"jobId"`
@@ -75,12 +122,12 @@ type ApplicationRow struct {
 	Job         JobSummaryInApplication `json:"job"`
 }
 
-// ApplicationsResponse wraps a list — matches Node.js: res.json({ applications })
+// ApplicationsResponse wraps the list of a job seeker's applications.
 type ApplicationsResponse struct {
 	Applications []ApplicationRow `json:"applications"`
 }
 
-// JobSummaryInSaved is the minimal job info inside a saved-job row.
+// JobSummaryInSaved represents the embedded job details inside a saved job entry.
 type JobSummaryInSaved struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
@@ -91,7 +138,7 @@ type JobSummaryInSaved struct {
 	CompanyName string `json:"companyName"`
 }
 
-// SavedJobRow represents a saved-job entry with embedded job summary.
+// SavedJobRow represents a bookmarked/saved job record.
 type SavedJobRow struct {
 	ID          string            `json:"id"`
 	JobID       string            `json:"jobId"`
@@ -100,13 +147,19 @@ type SavedJobRow struct {
 	Job         JobSummaryInSaved `json:"job"`
 }
 
-// SavedJobsResponse wraps the list — matches Node.js: res.json({ savedJobs })
+// SavedJobsResponse wraps the list of saved jobs.
 type SavedJobsResponse struct {
 	SavedJobs []SavedJobRow `json:"savedJobs"`
 }
 
-// QueuedResponse is returned for async operations (202 Accepted).
-// Mirrors Node.js: res.status(202).json({ queueJobId: job.id, status: "queued" })
+// QueuedResponse is returned with HTTP 202 Accepted when a task
+// (such as applying to a job or saving a job) is pushed onto Redis.
+//
+// 📝 EXAMPLE OUTGOING JSON:
+//   {
+//     "queueJobId": "e2f07297-76fa-4b8c-b062-8175d658bfe0",
+//     "status": "queued"
+//   }
 type QueuedResponse struct {
 	QueueJobID string `json:"queueJobId"`
 	Status     string `json:"status"`

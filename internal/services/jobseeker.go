@@ -1,4 +1,29 @@
-// Package services contains business logic, mirroring src/services/ in the Node.js backend.
+// ============================================================
+// FILE: internal/services/jobseeker.go
+// ROLE: Job-seeker profile, application, and saved-jobs business logic.
+//
+// 📚 KEY CONCEPTS IN THIS FILE:
+//
+//   COALESCE in SQL:
+//     COALESCE(value, fallback) returns the first non-NULL value.
+//     We use it on nullable columns so Go always receives a string (never nil).
+//     Example: COALESCE(bio, '') → empty string instead of NULL
+//
+//   COALESCE for PATCH updates:
+//     COALESCE($2, existing_column) → if $2 is NULL, keep existing value.
+//     This lets us implement PATCH semantics: only provided fields are updated.
+//
+//   ON CONFLICT DO UPDATE (upsert):
+//     SaveJob uses ON CONFLICT to silently ignore duplicate saves:
+//     if the job is already saved, the INSERT becomes a no-op UPDATE.
+//
+//   Queue integration:
+//     ApplyToJob and SaveJob are called by the queue WORKER (not directly by handlers).
+//     The handler enqueues a task; the worker calls these service methods.
+//
+// 📝 COMPARISON with Node.js:
+//   jobseeker.service.ts → JobSeekerService struct methods
+// ============================================================
 package services
 
 import (
@@ -11,7 +36,6 @@ import (
 )
 
 // JobSeekerService handles all job-seeker business logic.
-// Mirrors src/services/jobseeker.service.ts.
 type JobSeekerService struct {
 	pool *pgxpool.Pool
 }
@@ -21,9 +45,15 @@ func NewJobSeekerService(pool *pgxpool.Pool) *JobSeekerService {
 	return &JobSeekerService{pool: pool}
 }
 
-// ── internal helpers ──────────────────────────────────────────────────────────
+// ── private helpers ───────────────────────────────────────────────────────────
 
 // getJobSeekerID resolves userID → job_seeker_profiles.id.
+// Returns 404 if the user has no job seeker profile.
+//
+// 📝 WHY NOT USE userID DIRECTLY?
+//   The jobs table links to job_seeker_profiles.id, not users.id directly.
+//   This level of indirection allows one user to potentially have both
+//   a seeker profile and a recruiter profile (the upgrade flow).
 func (s *JobSeekerService) getJobSeekerID(ctx context.Context, userID string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx,
@@ -34,7 +64,13 @@ func (s *JobSeekerService) getJobSeekerID(ctx context.Context, userID string) (s
 	return id, nil
 }
 
-// scanProfile scans a profile row (with user join) into JobSeekerProfileResponse.
+// scanProfile scans a profile row (with user JOIN) into JobSeekerProfileResponse.
+// The interface{ Scan(...any) error } trick lets this function work for both
+// pool.QueryRow (single row) and rows (multi-row iteration).
+//
+// 📝 INTERFACE PARAMETER:
+//   func scanProfile(row interface{ Scan(...any) error })
+//   Any type with a Scan method works here — both *pgx.Row and *pgx.Rows satisfy this.
 func scanProfile(row interface {
 	Scan(...any) error
 }) (models.JobSeekerProfileResponse, error) {
@@ -50,8 +86,12 @@ func scanProfile(row interface {
 
 // ── public service methods ────────────────────────────────────────────────────
 
-// GetJobSeekerProfile returns the full profile with user info.
-// Mirrors jobseeker.service.ts → getJobSeekerProfile().
+// GetJobSeekerProfile returns the full profile with user info joined.
+//
+// 📝 COALESCE USAGE:
+//   COALESCE(p.bio, '')         → "" if bio is NULL (new user, no bio yet)
+//   COALESCE(p.skills, '{}')    → empty array "{}" if skills is NULL
+//   The Go struct receives strings/slices, not nullable types — simpler to work with.
 func (s *JobSeekerService) GetJobSeekerProfile(ctx context.Context, userID string) (models.JobSeekerProfileResponse, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT p.id, p.user_id, COALESCE(p.bio,''), COALESCE(p.location,''), COALESCE(p.skills,'{}'),
@@ -70,9 +110,20 @@ func (s *JobSeekerService) GetJobSeekerProfile(ctx context.Context, userID strin
 }
 
 // UpdateJobSeekerProfile applies partial updates using COALESCE.
-// Mirrors jobseeker.service.ts → updateJobSeekerProfile().
+//
+// 📝 HOW PARTIAL UPDATES WORK:
+//   Request struct uses pointer fields (*string, []string).
+//   nil = not provided by client = keep existing value.
+//   non-nil = provided = update to this value.
+//
+//   SQL: SET bio = COALESCE($2, bio)
+//   - $2 = nil (SQL NULL) → COALESCE returns existing bio (unchanged)
+//   - $2 = "I am a developer" → COALESCE returns "I am a developer" (updated)
+//
+// 📝 RETURNING clause:
+//   After UPDATE, we use RETURNING to get the new values in one round-trip.
+//   No need for a separate SELECT after UPDATE.
 func (s *JobSeekerService) UpdateJobSeekerProfile(ctx context.Context, userID string, req models.UpdateJobSeekerProfileRequest) (models.JobSeekerProfileResponse, error) {
-	// Convert pointer fields to interface{} — nil → SQL NULL → COALESCE keeps existing value
 	row := s.pool.QueryRow(ctx,
 		`UPDATE job_seeker_profiles
 		 SET bio        = COALESCE($2, bio),
@@ -100,15 +151,25 @@ func (s *JobSeekerService) UpdateJobSeekerProfile(ctx context.Context, userID st
 		return models.JobSeekerProfileResponse{}, apperrors.New("Profile not found", 404)
 	}
 
-	// Fetch user info for the response
+	// Fetch user info for the response (not returned by the UPDATE)
 	_ = s.pool.QueryRow(ctx, `SELECT name, email, roles FROM users WHERE id = $1`, userID).
 		Scan(&p.User.Name, &p.User.Email, &p.User.Roles)
 
 	return p, nil
 }
 
-// ApplyToJob executes the apply-to-job work synchronously (called by the queue worker).
-// Mirrors jobseeker.service.ts → applyToJob().
+// ApplyToJob creates a job application record.
+// Called by the queue WORKER (not the HTTP handler directly).
+//
+// 📝 WHY ASYNC VIA QUEUE?
+//   The handler enqueues the task and returns 202 immediately.
+//   The worker calls ApplyToJob in the background.
+//   This keeps the HTTP response fast and allows retries on DB failure.
+//
+// 📝 CHECKS PERFORMED:
+//   1. Job seeker has a profile
+//   2. Job exists and is still active
+//   3. User hasn't already applied to this job (409 if duplicate)
 func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverLetter string) (models.ApplicationRow, error) {
 	var app models.ApplicationRow
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
@@ -116,14 +177,14 @@ func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverL
 		return app, err
 	}
 
-	// Check job exists and is active
+	// Verify job is active
 	var isActive bool
 	err = s.pool.QueryRow(ctx, `SELECT is_active FROM jobs WHERE id = $1 LIMIT 1`, jobID).Scan(&isActive)
 	if err != nil {
 		return app, apperrors.New("Job not found", 404)
 	}
 	if !isActive {
-		return app, apperrors.New("This job is no longer active", 410)
+		return app, apperrors.New("This job is no longer active", 410) // 410 Gone
 	}
 
 	// Check for duplicate application
@@ -145,7 +206,11 @@ func (s *JobSeekerService) ApplyToJob(ctx context.Context, userID, jobID, coverL
 }
 
 // GetApplications returns all applications for the job seeker with job summary.
-// Mirrors jobseeker.service.ts → getApplications().
+//
+// 📝 JOIN PATTERN:
+//   applications a JOIN jobs j JOIN recruiter_profiles r
+//   The result includes job title, location, salary, category, and company name —
+//   everything the frontend needs to display the application list without extra calls.
 func (s *JobSeekerService) GetApplications(ctx context.Context, userID string) ([]models.ApplicationRow, error) {
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
@@ -185,14 +250,18 @@ func (s *JobSeekerService) GetApplications(ctx context.Context, userID string) (
 }
 
 // WithdrawApplication deletes an application, enforcing ownership.
-// Mirrors jobseeker.service.ts → withdrawApplication().
+// Only the job seeker who created the application can withdraw it.
+//
+// 📝 OWNERSHIP CHECK PATTERN:
+//   1. SELECT job_seeker_id FROM applications WHERE id = $1
+//   2. Compare against the authenticated user's jobSeekerID
+//   3. 403 Forbidden if they don't match
 func (s *JobSeekerService) WithdrawApplication(ctx context.Context, userID, applicationID string) error {
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
 		return err
 	}
 
-	// Verify it exists and belongs to this seeker
 	var ownerID string
 	err = s.pool.QueryRow(ctx,
 		`SELECT job_seeker_id FROM applications WHERE id = $1 LIMIT 1`, applicationID).Scan(&ownerID)
@@ -207,8 +276,15 @@ func (s *JobSeekerService) WithdrawApplication(ctx context.Context, userID, appl
 	return err
 }
 
-// SaveJob executes the save-job work synchronously (called by the queue worker).
-// Mirrors jobseeker.service.ts → saveJob().
+// SaveJob saves a job to the seeker's list (upsert — idempotent).
+// Called by the queue WORKER after a save-job task is dequeued.
+//
+// 📝 ON CONFLICT DO UPDATE (upsert):
+//   If the row already exists (same job_id + job_seeker_id), the INSERT
+//   would fail with a unique constraint error. Instead, we do a no-op UPDATE.
+//   "ON CONFLICT ... DO UPDATE SET job_id = EXCLUDED.job_id" re-sets job_id to itself
+//   (effectively a no-op) so the query succeeds and RETURNING still works.
+//   This makes SaveJob idempotent: calling it twice doesn't create duplicates.
 func (s *JobSeekerService) SaveJob(ctx context.Context, userID, jobID string) (models.SavedJobRow, error) {
 	var saved models.SavedJobRow
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
@@ -216,7 +292,7 @@ func (s *JobSeekerService) SaveJob(ctx context.Context, userID, jobID string) (m
 		return saved, err
 	}
 
-	// Check job exists
+	// Verify the job exists
 	var exists bool
 	_ = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE id=$1)`, jobID).Scan(&exists)
 	if !exists {
@@ -234,7 +310,7 @@ func (s *JobSeekerService) SaveJob(ctx context.Context, userID, jobID string) (m
 }
 
 // GetSavedJobs returns all saved jobs for the seeker with job summary.
-// Mirrors jobseeker.service.ts → getSavedJobs().
+// Same JOIN pattern as GetApplications — includes job details in one query.
 func (s *JobSeekerService) GetSavedJobs(ctx context.Context, userID string) ([]models.SavedJobRow, error) {
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
@@ -272,7 +348,10 @@ func (s *JobSeekerService) GetSavedJobs(ctx context.Context, userID string) ([]m
 }
 
 // UnsaveJob removes a job from the seeker's saved list.
-// Mirrors jobseeker.service.ts → unsaveJob().
+//
+// 📝 tag.RowsAffected():
+//   pool.Exec returns a CommandTag with metadata about the query result.
+//   RowsAffected() == 0 means no row matched the WHERE clause (job wasn't saved).
 func (s *JobSeekerService) UnsaveJob(ctx context.Context, userID, jobID string) error {
 	jobSeekerID, err := s.getJobSeekerID(ctx, userID)
 	if err != nil {
@@ -293,11 +372,16 @@ func (s *JobSeekerService) UnsaveJob(ctx context.Context, userID, jobID string) 
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// skillsArg converts a nil slice to nil (SQL NULL) and a non-nil slice to itself,
-// so COALESCE(skills, existing_skills) works correctly.
+// skillsArg converts a nil []string to nil (SQL NULL) so COALESCE works correctly.
+// When skills == nil (not provided in PATCH), we pass SQL NULL → COALESCE keeps existing.
+// When skills == []string{} (empty array), we pass the empty array → COALESCE updates to {}.
+//
+// 📝 WHY interface{}?
+//   pgx accepts both []string and nil as the $4 parameter.
+//   Returning interface{} lets us return either without a type mismatch.
 func skillsArg(skills []string) interface{} {
 	if skills == nil {
-		return nil
+		return nil // → SQL NULL → COALESCE keeps existing value
 	}
-	return skills
+	return skills // → SQL array → COALESCE uses this value
 }

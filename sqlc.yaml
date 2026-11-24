@@ -1,20 +1,39 @@
+# ============================================================
+# FILE: sqlc.yaml
+# ROLE: SQL Compiler (sqlc) Configuration File.
+#
+# 📚 WHAT IS SQLC?
+#   sqlc compiles raw SQL queries into type-safe Go code!
+#   Unlike heavy ORMs (like GORM, Hibernate, or Prisma), sqlc:
+#     - You write idiomatic, optimal PostgreSQL queries in `.sql` files.
+#     - sqlc parses your schema & queries, validates them against PostgreSQL rules,
+#       and generates Go structs and functions with zero runtime reflection overhead.
+# ============================================================
+
 version: "2"
 sql:
   - engine: "postgresql"
+    # Location of your raw SQL queries (e.g. queries/jobs.sql)
     queries: "internal/db/queries"
+    # Location of your database migration DDL schema files
     schema: "internal/db/migrations"
     gen:
       go:
         package: "sqlcdb"
         out: "internal/db/sqlc"
-        sql_package: "pgx/v5"
-        emit_json_tags: true
-        emit_pointers_for_null_types: true
+        sql_package: "pgx/v5" # Generates code using jackc/pgx/v5 driver
+        emit_json_tags: true  # Generates `json:"..."` struct tags automatically
+        emit_pointers_for_null_types: true # Generates *string instead of sql.NullString
+
+        # Type overrides map PostgreSQL database column types to idiomatic Go types:
         overrides:
+          # UUID column -> github.com/google/uuid.UUID struct
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # TIMESTAMPTZ column -> standard Go time.Time struct
           - db_type: "timestamptz"
             go_type: "time.Time"
+          # Custom PostgreSQL ENUM types mapped to plain Go strings:
           - db_type: "role"
             go_type:
               type: "string"

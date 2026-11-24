@@ -1,20 +1,38 @@
+# ============================================================
+# FILE: docker-compose.yml
+# ROLE: Multi-container local development & deployment orchestration.
+#
+# 📚 WHAT IS DOCKER COMPOSE?
+#   Docker Compose is a tool for defining and running multi-container Docker applications.
+#   With a single command (`docker compose up`), it spins up:
+#     1. backend:   The Go API server & background Asynq worker
+#     2. postgres:  PostgreSQL 16 relational database
+#     3. redis:     Redis 7 in-memory store for the Asynq task queue
+#     4. pgadmin:   Web UI for database inspection and SQL queries
+# ============================================================
 
 services:
+  # ── 1. Go API Server & Background Worker ──────────────────────────────────
+  # Runs cmd/server/main.go inside a containerized Go environment.
   backend:
     build:
-      context: .
-      target: builder
+      context: .           # Build using the Dockerfile in the current directory
+      target: builder      # Uses the multi-stage build target
     container_name: job-finder-backend-go
-    restart: unless-stopped
+    restart: unless-stopped # Automatically restarts on failure unless explicitly stopped
     ports:
+      # Host:Container port mapping.
+      # Access from browser / Postman via: http://localhost:5002
       - "5002:5002"
     depends_on:
+      # Wait until PostgreSQL passes its healthcheck (pg_isready) before starting backend
       postgres:
         condition: service_healthy
+      # Wait until Redis responds to PING before starting backend
       redis:
         condition: service_healthy
     env_file:
-      - .env
+      - .env                # Injects variables from .env into container environment
     environment:
       DATABASE_URL: ${DATABASE_URL}
       GO_ENV: ${GO_ENV}
@@ -28,11 +46,15 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
     networks:
       - job-network
+
+  # ── 2. PostgreSQL Relational Database ─────────────────────────────────────
+  # Stores users, recruiter profiles, jobs, seeker profiles, applications, saved jobs.
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine # Lightweight Alpine-based official PostgreSQL 16 image
     container_name: job-finder-db-go
     restart: unless-stopped
     ports:
+      # Exposes database port 5432 to host machine (useful for DBeaver/DataGrip/psql)
       - "5432:5432"
     env_file:
       - .env
@@ -41,15 +63,20 @@ services:
       POSTGRES_PASSWORD: ${DB_PASS}
       POSTGRES_DB: ${DB_NAME}
     volumes:
+      # Persists data to host volume so data is not lost when container stops
       - pgdata:/var/lib/postgresql/data
     networks:
       - job-network
     healthcheck:
+      # pg_isready tests whether PostgreSQL is accepting TCP connections
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # ── 3. pgAdmin Web Interface (Optional DB GUI) ───────────────────────────
+  # Access via browser at http://localhost:5050 to inspect tables and execute queries.
   pgadmin:
     image: dpage/pgadmin4
     container_name: job-finder-pgadmin-go
@@ -66,24 +93,32 @@ services:
     networks:
       - job-network
 
+  # ── 4. Redis In-Memory Task Queue Broker ─────────────────────────────────
+  # Used by Asynq to hold queued jobs ("apply-to-job", "save-job") for background processing.
   redis:
     image: redis:7-alpine
     container_name: job-finder-redis-go
     restart: unless-stopped
     ports:
+      # Exposes Redis port 6379 to host machine
       - "6379:6379"
     networks:
       - job-network
     healthcheck:
+      # redis-cli ping returns PONG when Redis is ready
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+# ── Shared Network ──────────────────────────────────────────────────────────
+# Enables inter-container communication using container names as hostnames
+# (e.g. backend reaches db via "job-finder-db-go:5432").
 networks:
   job-network:
     external: true
     name: job-finder-network
 
+# ── Persistent Storage Volumes ──────────────────────────────────────────────
 volumes:
   pgdata:
